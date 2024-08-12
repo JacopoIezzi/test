@@ -1,0 +1,92 @@
+steps:
+  - id: "Setup Artifact Registry"
+    name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        check_artifact=$(gcloud artifacts repositories describe $_REPO_ID --location=$_LOCATION --format='get(name)')
+        if test -z "$check_artifact"; then
+          gcloud artifacts repositories create $_REPO_ID \
+            --repository-format=docker \
+            --location=$_LOCATION \
+            --description="Docker repository for $_REPO_ID";
+        else echo "Repository $_REPO_ID already exists.";
+        fi
+
+  - id: "Get SHA last commit"
+    name: 'gcr.io/cloud-builders/git'
+    entrypoint: bash
+    args:
+     - -c
+     - |
+       git log --format="%H" -n 1 > /workspace/git_info_sha.data
+       echo $(git log -1 --date=format:"%Y%m%d_%T" --format="%ad") | sed 's/://g' > /workspace/git_info_timestamp.data
+       echo "$(git log --format="%H" -n 1)"
+
+  # Build the container image
+  - id: "Build the container image"
+    name: 'gcr.io/cloud-builders/docker'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+          TIMESTAMP_COMMIT="$(cat /workspace/git_info_timestamp.data)"
+          REVISION_ID_TIMESTAMP="$(cat /workspace/git_info_sha.data)-$$TIMESTAMP_COMMIT"
+          echo $$REVISION_ID_TIMESTAMP > /workspace/revision_id_timestamp.data
+          docker build --build-arg GOOGLE_CLOUD_PROJECT=$PROJECT_ID -t $_LOCATION-docker.pkg.dev/$PROJECT_ID/$_REPO_ID/$_REPO_ID:$$REVISION_ID_TIMESTAMP -t $_LOCATION-docker.pkg.dev/$PROJECT_ID/$_REPO_ID/$_REPO_ID:latest --file=Dockerfile .
+
+  # Push the container image to Artifact Registry
+  - id: "Push the container image to Artifact Registry"
+    name: 'gcr.io/cloud-builders/docker'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+          REVISION_ID_TIMESTAMP="$(cat /workspace/revision_id_timestamp.data)"
+          echo $$REVISION_ID_TIMESTAMP
+          docker push $_LOCATION-docker.pkg.dev/$PROJECT_ID/$_REPO_ID/$_REPO_ID:$$REVISION_ID_TIMESTAMP
+          docker push $_LOCATION-docker.pkg.dev/$PROJECT_ID/$_REPO_ID/$_REPO_ID:latest
+  # Deploy container image to Cloud Run
+  - id: "Deploy container image to Cloud Run"
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud run deploy ${_REPO_ID} \
+        --concurrency=${_CONCURRENCY} \
+        --cpu=${_CPU} \
+        --memory=${_MEMORY} \
+        --min-instances=${_MIN_INSTANCES} \
+        --max-instances=${_MAX_INSTANCES} \
+        --timeout=${_TIMEOUT_SECONDS} \
+        --service-account=${_SERVICE_ACCOUNT} \
+        --vpc-connector ${_VPC_CONNECTOR} \
+        --ingress="internal" \
+        --vpc-egress="all-traffic" \
+        --image $_LOCATION-docker.pkg.dev/$PROJECT_ID/$_REPO_ID/$_REPO_ID \
+        --region europe-west1 \
+        --env-vars-file $_PATH_ENV_VAR \
+        --cpu-boost
+
+timeout: '3600s'
+options:
+  logging: CLOUD_LOGGING_ONLY
+  env:
+    - 'GCP_PROJECT=$_GCP_PROJECT'
+    - 'BRANCH_REPO=$_BRANCH_REPO'
+    - 'REPO_ID=$_REPO_ID'
+    - 'PATH_ENV_VAR=$_PATH_ENV_VAR'
+    - 'PRIVATE_POOL_ID=$_PRIVATE_POOL_ID'
+    - 'VPC_CONNECTOR=$_VPC_CONNECTOR'
+    - 'CPU=$_CPU'
+    - 'MEMORY=$_MEMORY'
+    - 'CONCURRENCY=$_CONCURRENCY'
+    - 'MIN_INSTANCES=$_MIN_INSTANCES'
+    - 'MAX_INSTANCES=$_MAX_INSTANCES'
+    - 'TIMEOUT_SECONDS=$_TIMEOUT_SECONDS'
+    - 'SERVICE_ACCOUNT=$_SERVICE_ACCOUNT'
+    - 'LOCATION=$_LOCATION'
+  pool:
+    name: 'projects/${PROJECT_ID}/locations/europe-west1/workerPools/${_PRIVATE_POOL_ID}'
